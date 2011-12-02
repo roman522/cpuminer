@@ -11,6 +11,7 @@
 #include "cpuminer-config.h"
 #define _GNU_SOURCE
 
+#include <x86intrin.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -443,13 +444,14 @@ static void hashmeter(int thr_id, const struct timeval *diff,
 {
 	double khashes, secs;
 
-	khashes = hashes_done / 1000.0;
-	secs = (double)diff->tv_sec + ((double)diff->tv_usec / 1000000.0);
+	if (!opt_quiet){
+		khashes = hashes_done / 1000.0;
+		secs = (double)diff->tv_sec + ((double)diff->tv_usec / 1000000.0);
 
-	if (!opt_quiet)
 		applog(LOG_INFO, "thread %d: %lu hashes, %.2f khash/sec",
 		       thr_id, hashes_done,
 		       khashes / secs);
+	}
 }
 
 static bool get_work(struct thr_info *thr, struct work *work)
@@ -458,7 +460,7 @@ static bool get_work(struct thr_info *thr, struct work *work)
 	struct work *work_heap;
 
 	/* fill out work request message */
-	wc = calloc(1, sizeof(*wc));
+	wc = calloc(1, sizeof(struct workio_cmd));
 	if (!wc)
 		return false;
 
@@ -477,7 +479,7 @@ static bool get_work(struct thr_info *thr, struct work *work)
 		return false;
 
 	/* copy returned work into storage provided by caller */
-	memcpy(work, work_heap, sizeof(*work));
+	memcpy(work, work_heap, sizeof(struct work));
 	free(work_heap);
 
 	return true;
@@ -488,7 +490,7 @@ static bool submit_work(struct thr_info *thr, const struct work *work_in)
 	struct workio_cmd *wc;
 
 	/* fill out work request message */
-	wc = calloc(1, sizeof(*wc));
+	wc = calloc(1, sizeof(struct workio_cmd));
 	if (!wc)
 		return false;
 
@@ -531,12 +533,12 @@ static void *miner_thread(void *userdata)
 	
 	if (opt_algo == ALGO_SCRYPT)
 	{
-		scratchbuf = malloc(131583);
+		scratchbuf = _mm_malloc(129*1024, 4096);
 		max_nonce = 0xffff;
 	}
 
 	while (1) {
-		struct work work __attribute__((aligned(128)));
+		struct work __attribute__((aligned(128))) work;
 		unsigned long hashes_done;
 		struct timeval tv_start, tv_end, diff;
 		int diffms;
@@ -588,7 +590,7 @@ static void *miner_thread(void *userdata)
 
 out:
 	tq_freeze(mythr->q);
-
+	_mm_free(scratchbuf);
 	return NULL;
 }
 
@@ -792,7 +794,7 @@ static void parse_arg (int key, char *arg)
 
 #ifdef WIN32
 	if (!opt_n_threads)
-		opt_n_threads = 1;
+		opt_n_threads = pthread_num_processors_np();
 #else
 	num_processors = sysconf(_SC_NPROCESSORS_ONLN);
 	if (!opt_n_threads)
@@ -851,7 +853,12 @@ int main (int argc, char *argv[])
 {
 	struct thr_info *thr;
 	int i;
-
+	
+	if(argc<2){
+		printf("use --help for more info\n");
+		return -1;
+	}
+	
 	rpc_url = strdup(DEF_RPC_URL);
 
 	/* parse command line */

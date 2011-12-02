@@ -6,6 +6,11 @@ minerd.exe
 autom4te.cache
 .deps
 
+m4
+libcurl.m4
+*.dll
+*.so
+
 Makefile
 Makefile.in
 INSTALL

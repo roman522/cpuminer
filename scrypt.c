@@ -30,6 +30,7 @@
 #include "cpuminer-config.h"
 #include "miner.h"
 
+#include <x86intrin.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -86,8 +87,8 @@ be32enc_vect(uint32_t *dst, const uint32_t *src, uint32_t len)
 static void
 SHA256_Transform(uint32_t * state, const uint32_t block[16], int swap)
 {
-	uint32_t W[64];
-	uint32_t S[8];
+	uint32_t __attribute__((aligned(16))) W[64];
+	uint32_t __attribute__((aligned(16))) S[8];
 	uint32_t t0, t1;
 	int i;
 
@@ -190,8 +191,8 @@ SHA256_InitState(uint32_t * state)
 	state[7] = 0x5BE0CD19;
 }
 
-static const uint32_t passwdpad[12] = {0x00000080, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80020000};
-static const uint32_t outerpad[8] = {0x80000000, 0, 0, 0, 0, 0, 0, 0x00000300};
+static const uint32_t __attribute__((aligned(16))) passwdpad[12] = {0x00000080, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80020000};
+static const uint32_t __attribute__((aligned(16))) outerpad[8] = {0x80000000, 0, 0, 0, 0, 0, 0, 0x00000300};
 
 /**
  * PBKDF2_SHA256(passwd, passwdlen, salt, saltlen, c, buf, dkLen):
@@ -202,12 +203,12 @@ static inline void
 PBKDF2_SHA256_80_128(const uint32_t * passwd, uint32_t * buf)
 {
 	SHA256_CTX PShictx, PShoctx;
-	uint32_t tstate[8];
-	uint32_t ihash[8];
+	uint32_t __attribute__((aligned(16))) tstate[8];
+	uint32_t __attribute__((aligned(16))) ihash[8];
 	uint32_t i;
-	uint32_t pad[16];
+	uint32_t __attribute__((aligned(16))) pad[16];
 	
-	static const uint32_t innerpad[11] = {0x00000080, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xa0040000};
+	static const uint32_t __attribute__((aligned(16))) innerpad[11] = {0x00000080, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xa0040000};
 
 	/* If Klen > 64, the key is really SHA256(K). */
 	SHA256_InitState(tstate);
@@ -255,15 +256,15 @@ PBKDF2_SHA256_80_128(const uint32_t * passwd, uint32_t * buf)
 static inline uint32_t
 PBKDF2_SHA256_80_128_32(const uint32_t * passwd, const uint32_t * salt)
 {
-	uint32_t tstate[8];
-	uint32_t ostate[8];
-	uint32_t ihash[8];
+	uint32_t __attribute__((aligned(16))) tstate[8];
+	uint32_t __attribute__((aligned(16))) ostate[8];
+	uint32_t __attribute__((aligned(16))) ihash[8];
 	uint32_t i;
 
 	/* Compute HMAC state after processing P and S. */
 	uint32_t pad[16];
 	
-	static const uint32_t ihash_finalblk[16] = {0x00000001,0x80000000,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0x00000620};
+	static const uint32_t __attribute__((aligned(16))) ihash_finalblk[16] = {0x00000001,0x80000000,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0x00000620};
 
 	/* If Klen > 64, the key is really SHA256(K). */
 	SHA256_InitState(tstate);
@@ -364,14 +365,14 @@ salsa20_8(uint32_t B[16], const uint32_t Bx[16])
 static uint32_t scrypt_1024_1_1_256_sp(const uint32_t* input, char* scratchpad)
 {
 	uint32_t * V;
-	uint32_t X[32];
+	uint32_t __attribute__((aligned(16)))X[32];
 	uint32_t i;
 	uint32_t j;
 	uint32_t k;
 	uint64_t *p1, *p2;
 
 	p1 = (uint64_t *)X;
-	V = (uint32_t *)(((uintptr_t)(scratchpad) + 63) & ~ (uintptr_t)(63));
+	V = (uint32_t *)scratchpad;
 
 	PBKDF2_SHA256_80_128(input, X);
 
@@ -411,20 +412,17 @@ int scanhash_scrypt(int thr_id, unsigned char *pdata, unsigned char *scratchbuf,
 	const unsigned char *ptarget,
 	uint32_t max_nonce, unsigned long *hashes_done)
 {
-	uint32_t data[20];
+	uint32_t __attribute__((aligned(16))) data[20];
 	uint32_t tmp_hash7;
 	uint32_t n = 0;
 	uint32_t Htarg = ((const uint32_t *)ptarget)[7];
-	int i;
 
-	work_restart[thr_id].restart = 0;
-	
 	be32enc_vect(data, (const uint32_t *)pdata, 19);
 	
 	while(1) {
 		n++;
 		data[19] = n;
-		tmp_hash7 = scrypt_1024_1_1_256_sp(data, scratchbuf);
+		tmp_hash7 = scrypt_1024_1_1_256_sp(data, (char *)scratchbuf);
 
 		if (tmp_hash7 <= Htarg) {
 			((uint32_t *)pdata)[19] = byteswap(n);
@@ -434,6 +432,7 @@ int scanhash_scrypt(int thr_id, unsigned char *pdata, unsigned char *scratchbuf,
 
 		if ((n >= max_nonce) || work_restart[thr_id].restart) {
 			*hashes_done = n;
+			work_restart[thr_id].restart = 0;
 			break;
 		}
 	}

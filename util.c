@@ -11,6 +11,7 @@
 #define _GNU_SOURCE
 #include "cpuminer-config.h"
 
+#include <x86intrin.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -79,20 +80,22 @@ void applog(int prio, const char *fmt, ...)
 
 		pthread_mutex_lock(&time_lock);
 		tm_p = localtime(&tv.tv_sec);
-		memcpy(&tm, tm_p, sizeof(tm));
+		memcpy(&tm, tm_p, sizeof(struct tm));
 		pthread_mutex_unlock(&time_lock);
 
 		len = 40 + strlen(fmt) + 2;
 		f = alloca(len);
-		sprintf(f, "[%d-%02d-%02d %02d:%02d:%02d] %s\n",
-			tm.tm_year + 1900,
-			tm.tm_mon + 1,
-			tm.tm_mday,
+		sprintf(f, "[%02d:%02d:%02d] %s\n",
+//			tm.tm_year + 1900,
+//			tm.tm_mon + 1,
+//			tm.tm_mday,
 			tm.tm_hour,
 			tm.tm_min,
 			tm.tm_sec,
 			fmt);
+		pthread_mutex_lock(&time_lock);
 		vfprintf(stderr, f, ap);	/* atomic write to stderr */
+		pthread_mutex_unlock(&time_lock);
 	}
 	va_end(ap);
 }
@@ -442,7 +445,7 @@ struct thread_q *tq_new(void)
 {
 	struct thread_q *tq;
 
-	tq = calloc(1, sizeof(*tq));
+	tq = calloc(1, sizeof(struct thread_q));
 	if (!tq)
 		return NULL;
 
@@ -497,7 +500,7 @@ bool tq_push(struct thread_q *tq, void *data)
 	struct tq_ent *ent;
 	bool rc = true;
 
-	ent = calloc(1, sizeof(*ent));
+	ent = calloc(1, sizeof(struct tq_ent));
 	if (!ent)
 		return false;
 

@@ -1,3 +1,13 @@
+Version 1.0.x - xxx XX, 2012 
+Start cpu miner optimization. Hardware compare "Intel E7200 2.53GHz/DDR2-800" speed default make ~1.6 kh/s/core or 0.625 kh/s/GHz.
+
++fix bad display line of "new block detect of network" ()
++fix autodetect number CPU core on windows (mingw)
++fix crash with no options run on windows (mingw)
+-removed year, month and day  of console log. (nezacem)
+
+/***********************************************************************/
+
 - Linux x86_64 optimisations - Con Kolivas
 - Optimise for x86_64 by default by using sse2_64 algo
 - Detects CPUs and sets number of threads accordingly
