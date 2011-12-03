@@ -474,6 +474,19 @@ void tq_free(struct thread_q *tq)
 	memset(tq, 0, sizeof(*tq));	/* poison */
 	free(tq);
 }
+/* */
+void tq_zero(struct thread_q *tq)
+{
+	struct tq_ent *ent, *iter;
+
+	if (!tq)
+		return;
+
+	list_for_each_entry_safe(ent, iter, &tq->q, q_node) {
+		list_del(&ent->q_node);
+		free(ent);
+	}
+}
 
 static void tq_freezethaw(struct thread_q *tq, bool frozen)
 {

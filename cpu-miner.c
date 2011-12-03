@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2010 Jeff Garzik
  *
@@ -270,7 +269,7 @@ static bool submit_upstream_work(CURL *curl, const struct work *work)
 	json_t *val, *res;
 	char s[345];
 	bool rc = false;
-
+	
 	/* build hex string */
 	hexstr = bin2hex(work->data, sizeof(work->data));
 	if (unlikely(!hexstr)) {
@@ -314,6 +313,7 @@ static bool get_upstream_work(CURL *curl, struct work *work)
 {
 	json_t *val;
 	bool rc;
+
 
 	val = json_rpc_call(curl, rpc_url, rpc_userpass, rpc_req,
 			    want_longpoll, false);
@@ -485,6 +485,32 @@ static bool get_work(struct thr_info *thr, struct work *work)
 	return true;
 }
 
+static bool get_work_unlock(struct thr_info *thr )
+{
+	struct workio_cmd *wc;
+
+	/* fill out work request message */
+	wc = calloc(1, sizeof(struct workio_cmd));
+	if (!wc)
+		return false;
+
+	wc->cmd = WC_GET_WORK;
+	wc->thr = thr;
+
+	/* send work request to workio thread */
+	if (!tq_push(thr_info[work_thr_id].q, wc)) {
+		workio_cmd_free(wc);
+		return false;
+	}
+	return true;
+}
+
+static void inline get_work_free(struct thr_info *thr)
+{
+	tq_zero(thr->q);
+	return;
+}
+
 static bool submit_work(struct thr_info *thr, const struct work *work_in)
 {
 	struct workio_cmd *wc;
@@ -519,6 +545,12 @@ static void *miner_thread(void *userdata)
 	int thr_id = mythr->id;
 	uint32_t max_nonce = 0xffffff;
 	unsigned char *scratchbuf = NULL;
+	struct work __attribute__((aligned(128))) work;
+	unsigned long hashes_done;
+	struct timeval tv_start, tv_end, diff;
+	int diffms;
+	uint64_t max64;
+	bool rc;
 
 	/* Set worker threads to nice 19 and then preferentially to SCHED_IDLE
 	 * and if that fails, then SCHED_BATCH. No need for this to be an
@@ -534,40 +566,52 @@ static void *miner_thread(void *userdata)
 	if (opt_algo == ALGO_SCRYPT)
 	{
 		scratchbuf = _mm_malloc(129*1024, 4096);
-		max_nonce = 0xffff;
+		max_nonce = 0xffff/4;
+	}
+	
+	
+	/* obtain new work from internal workio thread */
+	if (unlikely(!get_work_unlock(mythr))) {
+		applog(LOG_ERR, "work retrieval failed, exiting "
+			"mining thread %d", mythr->id);
+		goto out;
 	}
 
 	while (1) {
-		struct work __attribute__((aligned(128))) work;
-		unsigned long hashes_done;
-		struct timeval tv_start, tv_end, diff;
-		int diffms;
-		uint64_t max64;
-		bool rc;
+		hashes_done = 0;
 
-		/* obtain new work from internal workio thread */
+//		gettimeofday(&tv_start, NULL);
 		if (unlikely(!get_work(mythr, &work))) {
 			applog(LOG_ERR, "work retrieval failed, exiting "
 				"mining thread %d", mythr->id);
 			goto out;
 		}
+//		gettimeofday(&tv_end, NULL);
+//		timeval_subtract(&diff, &tv_end, &tv_start);
+//		diffms = diff.tv_sec * 1000 + diff.tv_usec / 1000;
+//		printf("GetWork %d ms\n",diffms);
 
-		hashes_done = 0;
 		gettimeofday(&tv_start, NULL);
 
 		/* scan nonces for a proof-of-work hash */
-		switch (opt_algo) {
-		case ALGO_SCRYPT:
-			rc = scanhash_scrypt(thr_id, work.data, scratchbuf,
-			                     work.target, max_nonce, &hashes_done);
+		rc = scanhash_scrypt(thr_id, work.data, scratchbuf,
+		                     work.target, max_nonce/2, &hashes_done);
+							 
+		/* if nonce found, submit work */
+		if (rc && !submit_work(mythr, &work))
 			break;
-
-		default:
-			/* should never happen */
-			goto out;
-		}
-
-		/* record scanhash elapsed time */
+			
+		if(work_restart[thr_id].restart){
+			get_work_free( mythr );
+			if (unlikely(!get_work_unlock(mythr))) {
+				applog(LOG_ERR, "work retrieval failed, exiting "
+					"mining thread %d", mythr->id);
+				goto out;
+			}
+			work_restart[thr_id].restart = 0;
+		};
+	
+		 /* record scanhash elapsed time */
 		gettimeofday(&tv_end, NULL);
 		timeval_subtract(&diff, &tv_end, &tv_start);
 
@@ -582,10 +626,6 @@ static void *miner_thread(void *userdata)
 				max64 = 0xfffffffaULL;
 			max_nonce = max64;
 		}
-
-		/* if nonce found, submit work */
-		if (rc && !submit_work(mythr, &work))
-			break;
 	}
 
 out:

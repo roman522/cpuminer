@@ -417,7 +417,7 @@ int scanhash_scrypt(int thr_id, unsigned char *pdata, unsigned char *scratchbuf,
 	uint32_t n = 0;
 	uint32_t Htarg = ((const uint32_t *)ptarget)[7];
 
-	be32enc_vect(data, (const uint32_t *)pdata, 19);
+	be32enc_vect(data, (const uint32_t *)pdata, 20);
 	
 	while(1) {
 		n++;
@@ -432,7 +432,6 @@ int scanhash_scrypt(int thr_id, unsigned char *pdata, unsigned char *scratchbuf,
 
 		if ((n >= max_nonce) || work_restart[thr_id].restart) {
 			*hashes_done = n;
-			work_restart[thr_id].restart = 0;
 			break;
 		}
 	}
