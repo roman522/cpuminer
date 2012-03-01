@@ -74,21 +74,26 @@ void applog(int prio, const char *fmt, ...)
 		char *f;
 		int len;
 		struct timeval tv = { };
-		struct tm tm, *tm_p;
+		struct tm tm={}, *tm_p;
 
 		gettimeofday(&tv, NULL);
 
+#ifdef _WIN64
+		time_t ltim = tv.tv_sec;
+		tm.tm_sec = ltim%60;
+		ltim	/=	60;
+		tm.tm_min = ltim%60;
+		ltim	/=	60;
+		tm.tm_hour = ltim%24;
+#else
 		pthread_mutex_lock(&time_lock);
 		tm_p = localtime(&tv.tv_sec);
-		memcpy(&tm, tm_p, sizeof(struct tm));
+		memcpy(&tm, tm_p, sizeof(tm));
 		pthread_mutex_unlock(&time_lock);
-
+#endif
 		len = 40 + strlen(fmt) + 2;
 		f = alloca(len);
 		sprintf(f, "[%02d:%02d:%02d] %s\n",
-//			tm.tm_year + 1900,
-//			tm.tm_mon + 1,
-//			tm.tm_mday,
 			tm.tm_hour,
 			tm.tm_min,
 			tm.tm_sec,

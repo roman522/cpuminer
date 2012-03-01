@@ -129,8 +129,12 @@ extern bool hex2bin(unsigned char *p, const char *hexstr, size_t len);
 
 extern int scanhash_scrypt(int, unsigned char *pdata, unsigned char *scratchbuf,
 	const unsigned char *ptarget,
-	uint32_t max_nonce, unsigned long *nHashesDone);
+	uint32_t max_nonce, uint32_t *nHashesDone);
 
+extern int scanhash_scrypt2(int, unsigned char *pdata, unsigned char *scratchbuf,
+	const unsigned char *ptarget,
+	uint32_t max_nonce, uint32_t *nHashesDone);
+	
 extern int
 timeval_subtract (struct timeval *result, struct timeval *x, struct timeval *y);
 

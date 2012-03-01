@@ -82,10 +82,12 @@ struct workio_cmd {
 
 enum sha256_algos {
 	ALGO_SCRYPT,		/* scrypt(1024,1,1) */
+	ALGO_SCRYPT2,		/* scrypt2(1024,1,1) */
 };
 
 static const char *algo_names[] = {
 	[ALGO_SCRYPT]		= "scrypt",
+	[ALGO_SCRYPT2]		= "scrypt2",
 };
 
 bool opt_debug = false;
@@ -99,7 +101,11 @@ static int opt_fail_pause = 30;
 int opt_scantime = 5;
 static json_t *opt_config;
 static const bool opt_time = true;
-static enum sha256_algos opt_algo = ALGO_SCRYPT;
+///#ifdef _WIN32
+///static enum sha256_algos opt_algo = ALGO_SCRYPT;
+///#else
+static enum sha256_algos opt_algo = ALGO_SCRYPT2;
+///#endif
 static int opt_n_threads;
 static int num_processors;
 static char *rpc_url;
@@ -110,6 +116,10 @@ static int work_thr_id;
 int longpoll_thr_id;
 struct work_restart *work_restart = NULL;
 pthread_mutex_t time_lock;
+char proxy_opt[128]="";
+static volatile  unsigned int fifo_len = 4;
+unsigned int accept_work = 0;
+unsigned int reject_work = 0;
 
 
 struct option_help {
@@ -176,6 +186,12 @@ static struct option_help options_help[] = {
 	{ "pass PASSWORD",
 	  "(-p PASSWORD) Password for bitcoin JSON-RPC server "
 	  "(default: " DEF_RPC_PASSWORD ")" },
+	{ "proxy [type://][user:pass]name[:port]",
+	  ""
+	  "" },
+	{ "fifo N",
+	  "getwork len in fifo"
+	  "\t(default: 4; use 1 for solo mining and >1 for pool mining" },
 };
 
 static struct option options[] = {
@@ -197,6 +213,8 @@ static struct option options[] = {
 	{ "url", 1, NULL, 1001 },
 	{ "user", 1, NULL, 'u' },
 	{ "userpass", 1, NULL, 1002 },
+	{ "proxy", 1, NULL, 1010 },
+	{ "fifo", 1, NULL, 1011 },
 
 	{ }
 };
@@ -296,6 +314,12 @@ static bool submit_upstream_work(CURL *curl, const struct work *work)
 
 	applog(LOG_INFO, "PROOF OF WORK RESULT: %s",
 	       json_is_true(res) ? "true (yay!!!)" : "false (booooo)");
+	
+	if(json_is_true(res))
+		accept_work++;
+	else
+		reject_work++;
+
 
 	json_decref(val);
 
@@ -377,7 +401,7 @@ static bool workio_get_work(struct workio_cmd *wc, CURL *curl)
 static bool workio_submit_work(struct workio_cmd *wc, CURL *curl)
 {
 	int failures = 0;
-
+	
 	/* submit solution to bitcoin via JSON-RPC */
 	while (!submit_upstream_work(curl, wc->u.work)) {
 		if (unlikely((opt_retries >= 0) && (++failures > opt_retries))) {
@@ -405,6 +429,12 @@ static void *workio_thread(void *userdata)
 		applog(LOG_ERR, "CURL initialization failed");
 		return NULL;
 	}
+
+	if(strlen(proxy_opt)>4){
+		applog(LOG_ERR, "CURL initialization proxy %s of workio", proxy_opt);
+		curl_easy_setopt(curl, CURLOPT_PROXY, proxy_opt); 
+	}
+
 
 	while (ok) {
 		struct workio_cmd *wc;
@@ -440,7 +470,7 @@ static void *workio_thread(void *userdata)
 }
 
 static void hashmeter(int thr_id, const struct timeval *diff,
-		      unsigned long hashes_done)
+		      unsigned int hashes_done)
 {
 	double khashes, secs;
 
@@ -448,9 +478,9 @@ static void hashmeter(int thr_id, const struct timeval *diff,
 		khashes = hashes_done / 1000.0;
 		secs = (double)diff->tv_sec + ((double)diff->tv_usec / 1000000.0);
 
-		applog(LOG_INFO, "thread %d: %lu hashes, %.2f khash/sec",
+		applog(LOG_INFO, "thread %d: %7d hashes, %.2f khash/sec (%d/%d)",
 		       thr_id, hashes_done,
-		       khashes / secs);
+		       khashes / secs, accept_work, reject_work);
 	}
 }
 
@@ -487,20 +517,28 @@ static bool get_work(struct thr_info *thr, struct work *work)
 
 static bool get_work_unlock(struct thr_info *thr )
 {
+	unsigned int i;
+	unsigned int local_fifo_len;
 	struct workio_cmd *wc;
+	
+	
+	local_fifo_len = fifo_len;
+	
+	for(i=0;i<local_fifo_len;i++){
 
-	/* fill out work request message */
-	wc = calloc(1, sizeof(struct workio_cmd));
-	if (!wc)
-		return false;
+		/* fill out work request message */
+		wc = calloc(1, sizeof(struct workio_cmd));
+		if (!wc)
+			return false;
 
-	wc->cmd = WC_GET_WORK;
-	wc->thr = thr;
+		wc->cmd = WC_GET_WORK;
+		wc->thr = thr;
 
-	/* send work request to workio thread */
-	if (!tq_push(thr_info[work_thr_id].q, wc)) {
-		workio_cmd_free(wc);
-		return false;
+		/* send work request to workio thread */
+		if (!tq_push(thr_info[work_thr_id].q, wc)) {
+			workio_cmd_free(wc);
+			return false;
+		}
 	}
 	return true;
 }
@@ -545,10 +583,10 @@ static void *miner_thread(void *userdata)
 	int thr_id = mythr->id;
 	uint32_t max_nonce = 0xffffff;
 	unsigned char *scratchbuf = NULL;
-	struct work __attribute__((aligned(128))) work;
-	unsigned long hashes_done;
+	struct work __attribute__((aligned(16))) work;
+	uint32_t hashes_done;
 	struct timeval tv_start, tv_end, diff;
-	int diffms;
+	uint64_t diffms;
 	uint64_t max64;
 	bool rc;
 
@@ -563,67 +601,67 @@ static void *miner_thread(void *userdata)
 	if (!(opt_n_threads % num_processors))
 		affine_to_cpu(mythr->id, mythr->id % num_processors);
 	
-	if (opt_algo == ALGO_SCRYPT)
+//	if (opt_algo == ALGO_SCRYPT)
 	{
-		scratchbuf = _mm_malloc(129*1024, 4096);
+		scratchbuf = _mm_malloc(4*(4+128)*1024, 4096);
 		max_nonce = 0xffff/4;
 	}
-	
-	
+
 	/* obtain new work from internal workio thread */
 	if (unlikely(!get_work_unlock(mythr))) {
 		applog(LOG_ERR, "work retrieval failed, exiting "
 			"mining thread %d", mythr->id);
 		goto out;
 	}
-
+	usleep(300*1000);
 	while (1) {
 		hashes_done = 0;
 
-//		gettimeofday(&tv_start, NULL);
+		gettimeofday(&tv_start, NULL);
 		if (unlikely(!get_work(mythr, &work))) {
 			applog(LOG_ERR, "work retrieval failed, exiting "
 				"mining thread %d", mythr->id);
 			goto out;
 		}
-//		gettimeofday(&tv_end, NULL);
-//		timeval_subtract(&diff, &tv_end, &tv_start);
-//		diffms = diff.tv_sec * 1000 + diff.tv_usec / 1000;
-//		printf("GetWork %d ms\n",diffms);
-
-		gettimeofday(&tv_start, NULL);
 
 		/* scan nonces for a proof-of-work hash */
-		rc = scanhash_scrypt(thr_id, work.data, scratchbuf,
-		                     work.target, max_nonce/2, &hashes_done);
-							 
-		/* if nonce found, submit work */
-		if (rc && !submit_work(mythr, &work))
-			break;
-			
+		switch(opt_algo){
+			case ALGO_SCRYPT :
+				rc = scanhash_scrypt(thr_id, work.data, scratchbuf, work.target, max_nonce, &hashes_done);
+				break;
+			case ALGO_SCRYPT2 :
+				rc = scanhash_scrypt2(thr_id, work.data, scratchbuf, work.target, max_nonce, &hashes_done);
+				break;
+
+		}
+
 		if(work_restart[thr_id].restart){
-			get_work_free( mythr );
+/*			get_work_free( mythr );
 			if (unlikely(!get_work_unlock(mythr))) {
 				applog(LOG_ERR, "work retrieval failed, exiting "
 					"mining thread %d", mythr->id);
 				goto out;
 			}
-			work_restart[thr_id].restart = 0;
+*/			work_restart[thr_id].restart = 0;
+		}else{
+			/* if nonce found, submit work */
+			if (rc && !submit_work(mythr, &work))
+				break;
 		};
 	
 		 /* record scanhash elapsed time */
 		gettimeofday(&tv_end, NULL);
 		timeval_subtract(&diff, &tv_end, &tv_start);
-
+		
 		hashmeter(thr_id, &diff, hashes_done);
 
 		/* adjust max_nonce to meet target scan time */
 		diffms = diff.tv_sec * 1000 + diff.tv_usec / 1000;
 		if (diffms > 0) {
 			max64 =
-			   ((uint64_t)hashes_done * opt_scantime * 1000) / diffms;
-			if (max64 > 0xfffffffaULL)
-				max64 = 0xfffffffaULL;
+			   ((uint64_t)hashes_done * (uint64_t)opt_scantime * (uint64_t)1000) / diffms;
+			if (max64 > 0xffffff)
+				max64 = 0xffffff;
 			max_nonce = max64;
 		}
 	}
@@ -637,9 +675,15 @@ out:
 static void restart_threads(void)
 {
 	int i;
-
-	for (i = 0; i < opt_n_threads; i++)
+	get_work_free( &thr_info[work_thr_id] );
+	for (i = 0; i < opt_n_threads; i++){
+		get_work_free( &thr_info[i] );
+		if (unlikely(!get_work_unlock( &thr_info[i] ))){
+			applog(LOG_ERR, "work retrieval failed, exiting "
+				"mining thread %d", i);
+		}
 		work_restart[i].restart = 1;
+	}
 }
 
 static void *longpoll_thread(void *userdata)
@@ -680,6 +724,10 @@ static void *longpoll_thread(void *userdata)
 		applog(LOG_ERR, "CURL initialization failed");
 		goto out;
 	}
+	if(strlen(proxy_opt)>4){
+		applog(LOG_ERR, "CURL initialization proxy %s of longpoll", proxy_opt);
+		curl_easy_setopt(curl, CURLOPT_PROXY, proxy_opt); 
+	}
 
 	while (1) {
 		json_t *val;
@@ -719,7 +767,7 @@ static void show_usage(void)
 {
 	int i;
 
-	printf("minerd version %s\n\n", VERSION);
+	printf("minerd version %s.7569/RussianMod 0.3Alpha/[AWS]-r5\n\n", VERSION);
 	printf("Usage:\tminerd [options]\n\nSupported options:\n");
 	for (i = 0; i < ARRAY_SIZE(options_help); i++) {
 		struct option_help *h;
@@ -828,6 +876,15 @@ static void parse_arg (int key, char *arg)
 	case 1004:
 		use_syslog = true;
 		break;
+	case 1010:
+		strcpy(proxy_opt,arg);
+		break;
+	case 1011:
+		v = atoi(arg);
+		if (v < 0 || v > 32)
+			show_usage();
+		fifo_len = v;
+		break;
 	default:
 		show_usage();
 	}
@@ -898,6 +955,8 @@ int main (int argc, char *argv[])
 		printf("use --help for more info\n");
 		return -1;
 	}
+
+	pthread_mutex_init(&time_lock, NULL);
 	
 	rpc_url = strdup(DEF_RPC_URL);
 
@@ -915,7 +974,7 @@ int main (int argc, char *argv[])
 		sprintf(rpc_userpass, "%s:%s", rpc_user, rpc_pass);
 	}
 
-	pthread_mutex_init(&time_lock, NULL);
+	printf("minerd version %s.7569/RussianMod 0.3Alpha/[AWS]-r5\n\n", VERSION);
 
 #ifdef HAVE_SYSLOG_H
 	if (use_syslog)
